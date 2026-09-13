@@ -303,6 +303,8 @@ LobeHub 需要为 LLM 服务提供商提供文件对象的公网访问地址，�
 S3_ENDPOINT=https://s3.example.com
 ```
 
+`S3_ENDPOINT` 只需要能被浏览器访问：`docker-compose.yml` 设置了 `S3_INTERNAL_ENDPOINT=http://rustfs:9000`，LobeHub 服务端自身会在 Compose 网络内访问 RustFS。
+
 2. PostgreSQL
 
 该配置位于 `docker-compose.yml` 文件中，你需要配置数据库的名称和密码：
