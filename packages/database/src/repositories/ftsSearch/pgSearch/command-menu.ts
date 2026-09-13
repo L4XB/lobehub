@@ -13,6 +13,7 @@ import {
 } from '../../../schemas';
 import { sanitizeBm25Query } from '../../../utils/bm25';
 import { normalizeInboxAgentMeta, normalizeInboxAgentTitle } from '../../../utils/inboxAgent';
+import { searchableMessage } from '../../../utils/searchableMessage';
 import { notShareVisitorMessage, notShareVisitorTopic } from '../../../utils/shareVisitor';
 import { buildWorkspaceWhere } from '../../../utils/workspace';
 import type {
@@ -246,7 +247,7 @@ export async function searchMessages(
     .where(
       and(
         context.scanScopeWhere(messages),
-        ne(messages.role, 'tool'),
+        searchableMessage(),
         // Twin of the topics guard: visitor messages inherit the creator's
         // userId and are only identifiable through their parent topic.
         notShareVisitorMessage(),
