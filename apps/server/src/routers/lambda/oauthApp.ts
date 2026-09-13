@@ -54,18 +54,16 @@ const redirectUrisSchema = z
 export const oauthAppRouter = router({
   create: oauthAppWriteProcedure
     .input(
-      z
-        .object({
-          description: z.string().max(500).optional(),
-          logoUri: z.string().max(300_000).optional(),
-          name: z.string().min(1).max(64),
-          redirectUris: redirectUrisSchema.optional(),
-          type: z.enum(['device', 'web']).default('device'),
-        })
-        .refine((input) => input.type !== 'web' || !!input.redirectUris?.length, {
-          message: 'redirectUri.required',
-          path: ['redirectUris'],
-        }),
+      // Redirect URIs are configured on the app page after creation, so a web
+      // app may start with none; it simply cannot complete a login until one is
+      // added, and the provider refuses any unregistered redirect in the meantime.
+      z.object({
+        description: z.string().max(500).optional(),
+        logoUri: z.string().max(300_000).optional(),
+        name: z.string().min(1).max(64),
+        redirectUris: redirectUrisSchema.optional(),
+        type: z.enum(['device', 'web']).default('device'),
+      }),
     )
     .mutation(async ({ input, ctx }) => {
       const { client, secret } = await ctx.oidcClientModel.create(input);

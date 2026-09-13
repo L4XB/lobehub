@@ -4,11 +4,7 @@ import {
   validateRedirectUri,
 } from '@lobechat/utils/oauthApp';
 
-/** The form edits redirect URIs as one-per-line text; the API takes a list. */
-export const splitRedirectUris = (value?: string) =>
-  normalizeRedirectUris((value ?? '').split('\n'));
-
-export const joinRedirectUris = (uris?: string[] | null) => (uris ?? []).join('\n');
+export { MAX_OAUTH_REDIRECT_URIS, normalizeRedirectUris };
 
 const ISSUE_MESSAGE_KEYS = {
   credentials: 'oauthApp.validation.redirectUri.credentials',
@@ -19,22 +15,27 @@ const ISSUE_MESSAGE_KEYS = {
 } as const;
 
 /**
- * Validates the textarea contents against the same rules the server enforces.
- *
- * Returns the message key of the first problem found so the caller can localize
- * it, or `undefined` when every line is acceptable.
+ * Message key for one row of the redirect URI editor, or `undefined` when the
+ * value is acceptable. Blank rows pass here because saving drops them; the
+ * list-level rule is what refuses a list with nothing left in it.
  */
-export const validateRedirectUrisInput = (value?: string) => {
-  const uris = splitRedirectUris(value);
+export const redirectUriMessageKey = (value?: string) => {
+  if (!value?.trim()) return undefined;
+
+  const issue = validateRedirectUri(value);
+  return issue ? ISSUE_MESSAGE_KEYS[issue] : undefined;
+};
+
+/**
+ * Message key for the whole list, mirroring the server: a save needs at least
+ * one redirect URI and no more than the cap.
+ */
+export const redirectUriListMessageKey = (values: (string | undefined)[] = []) => {
+  const uris = normalizeRedirectUris(values.map((value) => value ?? ''));
 
   if (uris.length === 0) return 'oauthApp.validation.redirectUriRequired' as const;
   if (uris.length > MAX_OAUTH_REDIRECT_URIS)
     return 'oauthApp.validation.redirectUriTooMany' as const;
-
-  for (const uri of uris) {
-    const issue = validateRedirectUri(uri);
-    if (issue) return ISSUE_MESSAGE_KEYS[issue];
-  }
 
   return undefined;
 };

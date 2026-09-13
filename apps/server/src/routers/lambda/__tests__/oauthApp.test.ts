@@ -78,9 +78,12 @@ describe('oauthAppRouter', () => {
       expect(created).not.toHaveProperty('clientSecret', 'iv:tag:cipher');
     });
 
-    it('requires a redirect URI for a web app', async () => {
-      await expect(caller().create({ name: 'Develop Center', type: 'web' })).rejects.toThrow();
-      expect(mockCreate).not.toHaveBeenCalled();
+    it('lets a web app be created before its redirect URIs are configured', async () => {
+      await caller().create({ name: 'Develop Center', type: 'web' });
+
+      const [input] = mockCreate.mock.calls[0];
+      expect(input.type).toBe('web');
+      expect(input.redirectUris).toBeUndefined();
     });
 
     it.each([
