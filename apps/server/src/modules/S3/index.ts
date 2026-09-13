@@ -1,10 +1,12 @@
 import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
+  CreateBucketCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   paginateListParts,
   PutObjectCommand,
@@ -79,6 +81,34 @@ export class S3 {
       requestChecksumCalculation: 'WHEN_REQUIRED',
       responseChecksumValidation: 'WHEN_REQUIRED',
     });
+  }
+
+  /**
+   * Create the bucket when it does not exist yet. Self-hosted object storage such
+   * as the RustFS bundled with Docker Compose starts empty.
+   */
+  public async ensureBucket(): Promise<'created' | 'exists'> {
+    try {
+      await this.client.send(new HeadBucketCommand({ Bucket: this.bucket }));
+      return 'exists';
+    } catch (error) {
+      const { $metadata, name } = error as {
+        $metadata?: { httpStatusCode?: number };
+        name?: string;
+      };
+      if ($metadata?.httpStatusCode !== 404 && name !== 'NotFound' && name !== 'NoSuchBucket') {
+        throw error;
+      }
+    }
+
+    try {
+      await this.client.send(new CreateBucketCommand({ Bucket: this.bucket }));
+      return 'created';
+    } catch (error) {
+      // Another instance may have created it between the two calls
+      if ((error as { name?: string }).name === 'BucketAlreadyOwnedByYou') return 'exists';
+      throw error;
+    }
   }
 
   public async deleteFile(key: string) {

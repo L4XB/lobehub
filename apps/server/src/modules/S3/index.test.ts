@@ -3,10 +3,12 @@ import type { ListPartsCommandOutput } from '@aws-sdk/client-s3';
 import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
+  CreateBucketCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   paginateListParts,
   PutObjectCommand,
@@ -195,6 +197,63 @@ describe('FileS3', () => {
           region: 'us-east-1',
         }),
       );
+    });
+  });
+
+  describe('ensureBucket', () => {
+    it('leaves an existing bucket alone', async () => {
+      const s3 = new FileS3();
+      mockS3ClientSend.mockResolvedValueOnce({});
+
+      await expect(s3.ensureBucket()).resolves.toBe('exists');
+
+      expect(HeadBucketCommand).toHaveBeenCalledWith({ Bucket: 'test-bucket' });
+      expect(CreateBucketCommand).not.toHaveBeenCalled();
+    });
+
+    it('creates the bucket when it is missing', async () => {
+      const s3 = new FileS3();
+      mockS3ClientSend
+        .mockRejectedValueOnce(
+          Object.assign(new Error('NotFound'), {
+            $metadata: { httpStatusCode: 404 },
+            name: 'NotFound',
+          }),
+        )
+        .mockResolvedValueOnce({});
+
+      await expect(s3.ensureBucket()).resolves.toBe('created');
+
+      expect(CreateBucketCommand).toHaveBeenCalledWith({ Bucket: 'test-bucket' });
+    });
+
+    it('treats a bucket created concurrently as existing', async () => {
+      const s3 = new FileS3();
+      mockS3ClientSend
+        .mockRejectedValueOnce(
+          Object.assign(new Error('NotFound'), {
+            $metadata: { httpStatusCode: 404 },
+            name: 'NotFound',
+          }),
+        )
+        .mockRejectedValueOnce(
+          Object.assign(new Error('owned'), { name: 'BucketAlreadyOwnedByYou' }),
+        );
+
+      await expect(s3.ensureBucket()).resolves.toBe('exists');
+    });
+
+    it('does not try to create the bucket when the check fails for another reason', async () => {
+      const s3 = new FileS3();
+      mockS3ClientSend.mockRejectedValueOnce(
+        Object.assign(new Error('Forbidden'), {
+          $metadata: { httpStatusCode: 403 },
+          name: 'Forbidden',
+        }),
+      );
+
+      await expect(s3.ensureBucket()).rejects.toThrow('Forbidden');
+      expect(CreateBucketCommand).not.toHaveBeenCalled();
     });
   });
 

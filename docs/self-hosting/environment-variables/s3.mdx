@@ -58,6 +58,13 @@ LobeHub supports multimodal AI sessions, including the ability to upload unstruc
 - Default: `-` (disabled; the ACL is only set when explicitly configured to `1`)
 - Example: `1`
 
+### `S3_CREATE_BUCKET`
+
+- Type: Optional
+- Description: Create `S3_BUCKET` when LobeHub starts if it does not exist yet. The Docker Compose deployment enables it for the bundled RustFS. Leave it disabled when buckets are provisioned separately.
+- Default: `-` (disabled)
+- Example: `1`
+
 ### `S3_ENABLE_PATH_STYLE`
 
 - Type: Optional

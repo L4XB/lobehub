@@ -48,6 +48,20 @@ export async function register() {
   // to receive forwarded events at `/api/agent/messenger/webhooks/<platform>`,
   // which doesn't require any startup work.
 
+  // Object storage bundled with Docker Compose (RustFS) starts without buckets.
+  // Deployments opt in with S3_CREATE_BUCKET=1 instead of running an init container.
+  if (process.env.NEXT_RUNTIME === 'nodejs' && process.env.S3_CREATE_BUCKET === '1') {
+    void (async () => {
+      const { FileS3 } = await import('@/server/modules/S3');
+      const result = await new FileS3().ensureBucket();
+      if (result === 'created') {
+        console.info(`[Instrumentation] Created S3 bucket "${process.env.S3_BUCKET}"`);
+      }
+    })().catch((err) => {
+      console.error('[Instrumentation] Failed to ensure the S3 bucket exists:', err);
+    });
+  }
+
   if (process.env.NODE_ENV !== 'production' && !process.env.ENABLE_TELEMETRY_IN_DEV) {
     return;
   }

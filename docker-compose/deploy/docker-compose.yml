@@ -12,8 +12,6 @@ services:
         condition: service_healthy
       rustfs:
         condition: service_healthy
-      rustfs-init:
-        condition: service_completed_successfully
     environment:
       - 'KEY_VAULTS_SECRET=${KEY_VAULTS_SECRET}'
       - 'AUTH_SECRET=${AUTH_SECRET}'
@@ -28,14 +26,44 @@ services:
       - 'S3_SECRET_ACCESS_KEY=${RUSTFS_SECRET_KEY}'
       - 'LLM_VISION_IMAGE_USE_BASE64=1'
       - 'S3_SET_ACL=0'
+      # RustFS starts empty; LobeHub creates S3_BUCKET on startup when it is missing
+      - 'S3_CREATE_BUCKET=1'
       - 'SEARXNG_URL=http://searxng:8080'
       - 'REDIS_URL=redis://redis:6379'
       - 'REDIS_PREFIX=lobechat'
       - 'REDIS_TLS=0'
+      # Gateway Mode: agent runs execute on the server and stream to the browser
+      # through the gateway service below. The browser-facing AGENT_GATEWAY_URL
+      # comes from .env; server-to-gateway traffic stays on the Compose network.
+      - 'ENABLE_AGENT_GATEWAY=1'
+      - 'AGENT_GATEWAY_INTERNAL_URL=http://gateway:8787'
+      - 'AGENT_GATEWAY_SERVICE_TOKEN=${GATEWAY_SERVICE_TOKEN:-}'
+      - 'DEVICE_GATEWAY_SERVICE_TOKEN=${GATEWAY_SERVICE_TOKEN:-}'
     env_file:
       - .env
     volumes:
       - 'fts-search-reindex-state:/app/.elasticsearch-reindex'
+    restart: always
+    networks:
+      - lobe-network
+
+  # Single-instance LobeHub gateway (https://github.com/lobehub/lobehub-gateway):
+  # - 8787 agent gateway: relays Gateway Mode runs to browsers over WebSocket,
+  #   so AGENT_GATEWAY_URL in .env must be reachable from the browser.
+  # - 8788 device gateway: routes tool calls to devices joined with
+  #   `lh connect --gateway <url>`.
+  # State is kept in memory: runs in flight are lost when this container restarts.
+  gateway:
+    image: ghcr.io/lobehub/lobehub-gateway:0.3.2
+    container_name: lobe-gateway
+    ports:
+      - '${AGENT_GATEWAY_PORT:-8787}:8787'
+      - '${DEVICE_GATEWAY_PORT:-8788}:8788'
+    environment:
+      - 'SERVICE_TOKEN=${GATEWAY_SERVICE_TOKEN:-}'
+      # The gateway only reads the public half (kty/alg/n/e) of the key set.
+      - 'JWKS_PUBLIC_KEY=${JWKS_KEY:-}'
+      - 'LOBE_API_BASE_URL=http://lobe:3210'
     restart: always
     networks:
       - lobe-network
@@ -107,20 +135,6 @@ services:
       retries: 30
     command:
       ['--access-key', '${RUSTFS_ACCESS_KEY}', '--secret-key', '${RUSTFS_SECRET_KEY}', '/data']
-    networks:
-      - lobe-network
-
-  rustfs-init:
-    image: minio/mc:latest
-    container_name: lobe-rustfs-init
-    depends_on:
-      rustfs:
-        condition: service_healthy
-    volumes:
-      - ./bucket.config.json:/bucket.config.json:ro
-    entrypoint: /bin/sh
-    command: -c ' set -eux; echo "S3_ACCESS_KEY=${RUSTFS_ACCESS_KEY}, S3_SECRET_KEY=${RUSTFS_SECRET_KEY}"; mc --version; mc alias set rustfs "http://rustfs:9000" "${RUSTFS_ACCESS_KEY}" "${RUSTFS_SECRET_KEY}"; mc ls rustfs || true; mc mb "rustfs/lobe" --ignore-existing; mc admin info rustfs || true; mc anonymous set-json "/bucket.config.json" "rustfs/lobe"; '
-    restart: 'no'
     networks:
       - lobe-network
 

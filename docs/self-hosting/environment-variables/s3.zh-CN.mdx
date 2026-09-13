@@ -56,6 +56,13 @@ LobeHub 支持多模态的 AI 会话，包括将图片、文件等非结构化�
 - 默认值：`-`（默认关闭，仅显式设置为 `1` 时才会设置 public-read ACL）
 - 示例：`1`
 
+### `S3_CREATE_BUCKET`
+
+- 类型：可选
+- 描述：LobeHub 启动时，如果 `S3_BUCKET` 不存在则自动创建。Docker Compose 部署为自带的 RustFS 开启了该选项；存储桶由其他方式预先创建时保持关闭即可。
+- 默认值：`-`（关闭）
+- 示例：`1`
+
 ### `S3_ENABLE_PATH_STYLE`
 
 - 类型：可选
