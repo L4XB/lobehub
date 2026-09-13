@@ -419,10 +419,12 @@ describe('FtsSearchSyncOutboxRepository', { concurrent: false }, () => {
 
     const failingDatabase = {
       execute: db.execute.bind(db),
-      transaction: (callback: (transaction: { execute: typeof db.execute }) => Promise<void>) =>
+      transaction: (
+        callback: (transaction: { execute: (statement: SQL) => unknown }) => Promise<void>,
+      ) =>
         db.transaction(async (transaction) =>
           callback({
-            execute: async (statement) => {
+            execute: (statement) => {
               if (normalizeSql(statement).startsWith('CREATE TRIGGER')) {
                 throw new Error('injected trigger creation failure');
               }
