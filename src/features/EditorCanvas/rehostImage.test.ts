@@ -11,12 +11,16 @@ vi.mock('@/services/file', () => ({ fileService: { rehostImage: vi.fn() } }));
 vi.mock('@lobehub/ui/base-ui', () => ({ toast: { error: vi.fn() } }));
 vi.mock('i18next', () => ({ t: (key: string) => key }));
 
+const setWindowUrl = (url: string) => {
+  (window as typeof window & { happyDOM: { setURL: (url: string) => void } }).happyDOM.setURL(url);
+};
+
 describe('editor image rehosting', () => {
   const defaultUrl = window.location.href;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    window.happyDOM.setURL(defaultUrl);
+    setWindowUrl(defaultUrl);
   });
 
   it('transfers Discord and external image URLs', () => {
@@ -25,7 +29,7 @@ describe('editor image rehosting', () => {
   });
 
   it('normalizes protocol-relative images to HTTPS on the desktop origin', async () => {
-    window.happyDOM.setURL('app://renderer/');
+    setWindowUrl('app://renderer/');
     vi.mocked(fileService.rehostImage).mockResolvedValue({
       fileId: 'rehosted-file',
       url: 'https://storage.example/rehosted.png',
