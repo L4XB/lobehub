@@ -3,6 +3,7 @@ import { CacheRevalidate, CacheTag } from '@lobechat/types';
 import { MarketSDK, type OrgRef, orgRefToPathSegment } from '@lobehub/market-sdk';
 import debug from 'debug';
 import { type NextRequest } from 'next/server';
+import pMap from 'p-map';
 
 import { type TrustedClientUserInfo } from '@/libs/trusted-client';
 import { generateTrustedClientToken, getTrustedClientTokenForSession } from '@/libs/trusted-client';
@@ -17,6 +18,8 @@ const log = debug('lobe-server:market-service');
 const MARKET_BASE_URL = process.env.MARKET_BASE_URL || 'https://market.lobehub.com';
 /** Applies to `listConnections` and to each provider's tool-list request. */
 export const LOBEHUB_SKILL_DISCOVERY_TIMEOUT_MS = 3_000;
+/** Max providers whose tool lists are fetched at once during discovery. */
+export const LOBEHUB_SKILL_DISCOVERY_CONCURRENCY = 5;
 export const LOBEHUB_SKILL_EXECUTION_TIMEOUT_MS = 120_000;
 
 /**
@@ -771,11 +774,12 @@ export class MarketService {
 
       log('getLobehubSkillManifests: found %d connected skills', connections.length);
 
-      // 2. Fetch tools for every connection concurrently. This runs on the
+      // 2. Fetch tools for connections concurrently (bounded). This runs on the
       // execAgent send path, so one slow provider must not serialize the rest;
-      // Promise.all keeps the manifests in connection order.
-      const manifests = await Promise.all(
-        connections.map(async (connection): Promise<LobeToolManifest | undefined> => {
+      // pMap keeps the manifests in connection order.
+      const manifests = await pMap(
+        connections,
+        async (connection): Promise<LobeToolManifest | undefined> => {
           try {
             // Connection returns providerId (e.g., 'twitter', 'linear'), not numeric id
             const providerId = (connection as any).providerId;
@@ -817,7 +821,8 @@ export class MarketService {
           } catch (error) {
             log('getLobehubSkillManifests: failed to fetch tools for connection: %O', error);
           }
-        }),
+        },
+        { concurrency: LOBEHUB_SKILL_DISCOVERY_CONCURRENCY },
       );
 
       return manifests.filter((manifest): manifest is LobeToolManifest => !!manifest);

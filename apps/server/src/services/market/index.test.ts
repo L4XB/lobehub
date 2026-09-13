@@ -5,7 +5,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { generateTrustedClientToken, getTrustedClientTokenForSession } from '@/libs/trusted-client';
 
-import { extractAccessToken, LOBEHUB_SKILL_DISCOVERY_TIMEOUT_MS, MarketService } from './index';
+import {
+  extractAccessToken,
+  LOBEHUB_SKILL_DISCOVERY_CONCURRENCY,
+  LOBEHUB_SKILL_DISCOVERY_TIMEOUT_MS,
+  MarketService,
+} from './index';
 
 // Mock dependencies before importing the module under test
 vi.mock('@lobehub/market-sdk', () => {
@@ -796,6 +801,30 @@ describe('MarketService', () => {
 
       const manifests = await result;
       expect(manifests.map((manifest) => manifest.identifier)).toEqual(['linear', 'github']);
+    });
+
+    it('should cap how many provider tool lists are fetched at once', async () => {
+      const service = new MarketService();
+      const connectionCount = LOBEHUB_SKILL_DISCOVERY_CONCURRENCY + 3;
+      (service as any).market.connect.listConnections = vi.fn().mockResolvedValue({
+        connections: Array.from({ length: connectionCount }, (_, index) => ({
+          providerId: `provider-${index}`,
+        })),
+      });
+      let inFlight = 0;
+      let maxInFlight = 0;
+      (service as any).market.skills.listTools = vi.fn().mockImplementation(async () => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight -= 1;
+        return { tools: [{ description: 'Do', inputSchema: {}, name: 'do' }] };
+      });
+
+      const manifests = await service.getLobehubSkillManifests();
+
+      expect(manifests).toHaveLength(connectionCount);
+      expect(maxInFlight).toBe(LOBEHUB_SKILL_DISCOVERY_CONCURRENCY);
     });
 
     it('should bound each provider request and fall back to static tools on live timeout', async () => {
