@@ -7,13 +7,33 @@ import { type NextRequest } from 'next/server';
 import { type TrustedClientUserInfo } from '@/libs/trusted-client';
 import { generateTrustedClientToken, getTrustedClientTokenForSession } from '@/libs/trusted-client';
 
-import { listSkillToolsWithLiveFallback } from './listSkillToolsWithLiveFallback';
+import {
+  listSkillToolsWithLiveFallback,
+  type SkillToolsClient,
+} from './listSkillToolsWithLiveFallback';
 
 const log = debug('lobe-server:market-service');
 
 const MARKET_BASE_URL = process.env.MARKET_BASE_URL || 'https://market.lobehub.com';
+/** Applies to `listConnections` and to each provider's tool-list request. */
 export const LOBEHUB_SKILL_DISCOVERY_TIMEOUT_MS = 3_000;
 export const LOBEHUB_SKILL_EXECUTION_TIMEOUT_MS = 120_000;
+
+/**
+ * Provider display names for skill manifests. `connection.providerName` is the
+ * *user's* display name on that provider (e.g. "LiJian" instead of "Linear"),
+ * not the provider's own name. Static map — importing LOBEHUB_SKILL_PROVIDERS
+ * pulls in react-icons (client-side only). Keep in sync with lobehubSkill.ts.
+ */
+const LOBEHUB_SKILL_PROVIDER_LABELS: Record<string, string> = {
+  github: 'GitHub',
+  linear: 'Linear',
+  microsoft: 'Outlook Calendar',
+  notion: 'Notion',
+  posthog: 'PostHog',
+  twitter: 'X',
+  vercel: 'Vercel',
+};
 
 // ============================== Helper Functions ==============================
 
@@ -374,12 +394,9 @@ export class MarketService {
   /**
    * List available tools for a provider
    */
-  async listSkillTools(providerId: string) {
+  async listSkillTools(providerId: string, options?: { timeoutMs?: number }) {
     return listSkillToolsWithLiveFallback(
-      this.market.skills as {
-        listLiveTools?: (providerId: string) => Promise<any>;
-        listTools: (providerId: string) => Promise<any>;
-      },
+      this.market.skills as SkillToolsClient,
       providerId,
       (error) => {
         log(
@@ -388,6 +405,7 @@ export class MarketService {
           error,
         );
       },
+      options?.timeoutMs,
     );
   }
 
@@ -753,67 +771,56 @@ export class MarketService {
 
       log('getLobehubSkillManifests: found %d connected skills', connections.length);
 
-      // 2. Fetch tools for each connection and build manifests
-      const manifests: LobeToolManifest[] = [];
+      // 2. Fetch tools for every connection concurrently. This runs on the
+      // execAgent send path, so one slow provider must not serialize the rest;
+      // Promise.all keeps the manifests in connection order.
+      const manifests = await Promise.all(
+        connections.map(async (connection): Promise<LobeToolManifest | undefined> => {
+          try {
+            // Connection returns providerId (e.g., 'twitter', 'linear'), not numeric id
+            const providerId = (connection as any).providerId;
+            if (!providerId) {
+              log('getLobehubSkillManifests: connection missing providerId: %O', connection);
+              return;
+            }
+            const icon = (connection as any).icon;
+            const providerLabel = LOBEHUB_SKILL_PROVIDER_LABELS[providerId] || providerId;
 
-      for (const connection of connections) {
-        try {
-          // Connection returns providerId (e.g., 'twitter', 'linear'), not numeric id
-          const providerId = (connection as any).providerId;
-          if (!providerId) {
-            log('getLobehubSkillManifests: connection missing providerId: %O', connection);
-            continue;
+            const { tools, instruction } = await this.listSkillTools(providerId, {
+              timeoutMs: LOBEHUB_SKILL_DISCOVERY_TIMEOUT_MS,
+            });
+            if (!tools || tools.length === 0) return;
+
+            const manifest: LobeToolManifest = {
+              api: tools.map((tool: any) => ({
+                description: tool.description || '',
+                name: tool.name,
+                parameters: tool.inputSchema || { properties: {}, type: 'object' },
+              })),
+              identifier: providerId,
+              meta: {
+                avatar: icon || '🔗',
+                description: `LobeHub Skill: ${providerLabel}`,
+                tags: ['lobehub-skill', providerId],
+                title: providerLabel,
+              },
+              systemRole: instruction || undefined,
+              type: 'builtin',
+            };
+
+            log(
+              'getLobehubSkillManifests: built manifest for %s with %d tools',
+              providerId,
+              tools.length,
+            );
+            return manifest;
+          } catch (error) {
+            log('getLobehubSkillManifests: failed to fetch tools for connection: %O', error);
           }
-          const icon = (connection as any).icon;
+        }),
+      );
 
-          // Look up the provider's display name from the static registry.
-          // connection.providerName is the *user's* display name on that provider,
-          // NOT the provider's own name (e.g., "LiJian" instead of "Linear").
-          // Static label map — avoids importing LOBEHUB_SKILL_PROVIDERS which
-          // pulls in react-icons (client-side only). Keep in sync with lobehubSkill.ts.
-          const PROVIDER_LABELS: Record<string, string> = {
-            github: 'GitHub',
-            linear: 'Linear',
-            microsoft: 'Outlook Calendar',
-            notion: 'Notion',
-            posthog: 'PostHog',
-            twitter: 'X',
-            vercel: 'Vercel',
-          };
-          const providerLabel = PROVIDER_LABELS[providerId] || providerId;
-
-          const { tools, instruction } = await this.listSkillTools(providerId);
-          if (!tools || tools.length === 0) continue;
-
-          const manifest: LobeToolManifest = {
-            api: tools.map((tool: any) => ({
-              description: tool.description || '',
-              name: tool.name,
-              parameters: tool.inputSchema || { properties: {}, type: 'object' },
-            })),
-            identifier: providerId,
-            meta: {
-              avatar: icon || '🔗',
-              description: `LobeHub Skill: ${providerLabel}`,
-              tags: ['lobehub-skill', providerId],
-              title: providerLabel,
-            },
-            systemRole: instruction || undefined,
-            type: 'builtin',
-          };
-
-          manifests.push(manifest);
-          log(
-            'getLobehubSkillManifests: built manifest for %s with %d tools',
-            providerId,
-            tools.length,
-          );
-        } catch (error) {
-          log('getLobehubSkillManifests: failed to fetch tools for connection: %O', error);
-        }
-      }
-
-      return manifests;
+      return manifests.filter((manifest): manifest is LobeToolManifest => !!manifest);
     } catch (error) {
       log('getLobehubSkillManifests: error fetching skills: %O', error);
       return [];

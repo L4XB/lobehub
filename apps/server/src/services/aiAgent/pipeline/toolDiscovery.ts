@@ -20,13 +20,15 @@ import type {
 } from '@lobechat/context-engine';
 import type { LobeChatDatabase } from '@lobechat/database';
 import type { DeviceUnavailableErrorData } from '@lobechat/device-gateway-client';
+import { SpanStatusCode } from '@lobechat/observability-otel/api';
+import { tracer as agentRuntimeTracer } from '@lobechat/observability-otel/modules/agent-runtime';
 import type { ChatTopicBotContext, RequestTrigger } from '@lobechat/types';
 import { getActivePluginIds } from '@lobechat/types';
 import { TRPCError } from '@trpc/server';
 import debug from 'debug';
 import type { ModelAbilities } from 'model-bank';
 
-import type { loadModels } from '@/business/client/model-bank/loadModels';
+import { loadModels } from '@/business/client/model-bank/loadModels';
 import { AiModelModel } from '@/database/models/aiModel';
 import { AiProviderModel } from '@/database/models/aiProvider';
 import { ChatGroupModel } from '@/database/models/chatGroup';
@@ -87,6 +89,23 @@ import { filterPluginsByShareGate, shareGateGrantsCloudSandbox } from '../shareG
 import type { ExecRunContext, InternalExecAgentParams } from '../types';
 
 const log = debug('lobe-server:ai-agent-service');
+
+/**
+ * Wrap an IO-bound discovery stage in a span. Discovery runs on the send path
+ * before the operation exists, so these spans are the only breakdown of how
+ * long a user waits between "message saved" and "operation started".
+ */
+const traceDiscoveryStage = <T>(stage: string, fn: () => Promise<T>): Promise<T> =>
+  agentRuntimeTracer.startActiveSpan(`tool_discovery ${stage}`, async (span) => {
+    try {
+      return await fn();
+    } catch (error) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (error as Error)?.message });
+      throw error;
+    } finally {
+      span.end();
+    }
+  });
 
 export interface ToolDiscoveryDeps {
   agentDocumentsService: AgentDocumentsService;
@@ -276,12 +295,18 @@ export const discoverTools = async (
   }
 
   // Model metadata is needed both for tool support checks and agent-management context.
-  const { loadModels } = await import('@/business/client/model-bank/loadModels');
   const builtinModels = await loadModels();
-  const [modelMetadataResult, providerMetadataResult] = await Promise.allSettled([
-    new AiModelModel(deps.db, deps.userId, deps.workspaceId).findByIdAndProvider(model, provider),
-    new AiProviderModel(deps.db, deps.userId, deps.workspaceId).findById(provider),
-  ]);
+  const [modelMetadataResult, providerMetadataResult] = await traceDiscoveryStage(
+    'model_metadata',
+    () =>
+      Promise.allSettled([
+        new AiModelModel(deps.db, deps.userId, deps.workspaceId).findByIdAndProvider(
+          model,
+          provider,
+        ),
+        new AiProviderModel(deps.db, deps.userId, deps.workspaceId).findById(provider),
+      ]),
+  );
   if (modelMetadataResult.status === 'rejected') {
     log('execAgent: failed to load active model search metadata: %O', modelMetadataResult.reason);
   }
@@ -442,7 +467,9 @@ export const discoverTools = async (
     // 5c. Fetch LobeHub Skills manifests
     try {
       const marketService = await deps.getMarketService();
-      lobehubSkillManifests = await marketService.getLobehubSkillManifests();
+      lobehubSkillManifests = await traceDiscoveryStage('lobehub_skills', () =>
+        marketService.getLobehubSkillManifests(),
+      );
     } catch (error) {
       log('execAgent: failed to fetch lobehub skill manifests: %O', error);
     }
@@ -450,7 +477,9 @@ export const discoverTools = async (
 
     // 5d. Fetch Composio tool manifests from database
     try {
-      composioManifests = await deps.composioService.getComposioManifests(resolvedAgentId);
+      composioManifests = await traceDiscoveryStage('composio', () =>
+        deps.composioService.getComposioManifests(resolvedAgentId),
+      );
     } catch (error) {
       log('execAgent: failed to fetch composio manifests: %O', error);
     }
@@ -551,7 +580,9 @@ export const discoverTools = async (
         // downstream `onlineDeviceIds` / `deviceOnline` treat this list as the
         // online set.
         onlineDevices = (
-          await getScopedOnlineDevices(deps.db, deps.userId, deps.workspaceId)
+          await traceDiscoveryStage('online_devices', () =>
+            getScopedOnlineDevices(deps.db, deps.userId, deps.workspaceId),
+          )
         ).filter((d) => d.online);
         // A workspace agent whose caller pinned this desktop's personal
         // deviceId via `users.preference.agentDeviceOverrides` (
@@ -773,16 +804,18 @@ export const discoverTools = async (
 
     // Opt-in capability from the existing system-info RPC. Older desktop and CLI
     // clients omit it, so they must never receive the new Computer Use manifest.
-    const supportedDeviceTools =
-      activeDeviceId && canUseDevice && !disableLocalSystem
-        ? (
-            await deviceGateway.queryDeviceSystemInfo(
+    const systemInfoDeviceId = canUseDevice && !disableLocalSystem ? activeDeviceId : undefined;
+    const supportedDeviceTools = systemInfoDeviceId
+      ? (
+          await traceDiscoveryStage('device_system_info', () =>
+            deviceGateway.queryDeviceSystemInfo(
               deps.userId,
-              activeDeviceId,
+              systemInfoDeviceId,
               activeDeviceScope === 'workspace' ? deps.workspaceId : undefined,
-            )
-          )?.supportedTools
-        : undefined;
+            ),
+          )
+        )?.supportedTools
+      : undefined;
 
     // Resolve the operation's group context ONCE here and snapshot it into op
     // metadata below — the per-step context engine reads it back without a DB

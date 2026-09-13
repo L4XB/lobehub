@@ -673,7 +673,9 @@ describe('MarketService', () => {
 
       const manifests = await service.getLobehubSkillManifests();
 
-      expect((service as any).market.skills.listLiveTools).toHaveBeenCalledWith('posthog');
+      expect((service as any).market.skills.listLiveTools).toHaveBeenCalledWith('posthog', {
+        signal: expect.any(AbortSignal),
+      });
       expect((service as any).market.skills.listTools).not.toHaveBeenCalled();
       expect(manifests).toHaveLength(1);
       expect(manifests[0]).toMatchObject({
@@ -764,6 +766,67 @@ describe('MarketService', () => {
       const manifests = await service.getLobehubSkillManifests();
       expect(manifests).toHaveLength(1);
       expect(manifests[0].identifier).toBe('working');
+    });
+
+    it('should fetch provider tools concurrently and keep connection order', async () => {
+      const service = new MarketService();
+      (service as any).market.connect.listConnections = vi.fn().mockResolvedValue({
+        connections: [
+          { providerId: 'linear', providerName: 'Linear' },
+          { providerId: 'github', providerName: 'GitHub' },
+        ],
+      });
+      const pending = new Map<string, (value: unknown) => void>();
+      (service as any).market.skills.listTools = vi.fn().mockImplementation(
+        (id: string) =>
+          new Promise((resolve) => {
+            pending.set(id, resolve);
+          }),
+      );
+
+      const result = service.getLobehubSkillManifests();
+
+      // A serial loop would only have issued the first request here.
+      await vi.waitFor(() =>
+        expect((service as any).market.skills.listTools).toHaveBeenCalledTimes(2),
+      );
+
+      pending.get('github')!({ tools: [{ description: 'Repo', inputSchema: {}, name: 'repo' }] });
+      pending.get('linear')!({ tools: [{ description: 'Issue', inputSchema: {}, name: 'issue' }] });
+
+      const manifests = await result;
+      expect(manifests.map((manifest) => manifest.identifier)).toEqual(['linear', 'github']);
+    });
+
+    it('should bound each provider request and fall back to static tools on live timeout', async () => {
+      const service = new MarketService();
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+      const timeoutError = new Error('The operation was aborted due to timeout');
+      timeoutError.name = 'TimeoutError';
+      (service as any).market.connect.listConnections = vi.fn().mockResolvedValue({
+        connections: [{ providerId: 'posthog', providerName: 'Workspace' }],
+      });
+      (service as any).market.skills.listLiveTools = vi.fn().mockRejectedValue(timeoutError);
+      (service as any).market.skills.listTools = vi.fn().mockResolvedValue({
+        tools: [{ description: 'Query', inputSchema: {}, name: 'query' }],
+      });
+
+      try {
+        const manifests = await service.getLobehubSkillManifests();
+
+        expect(manifests.map((manifest) => manifest.identifier)).toEqual(['posthog']);
+        const signalArg = { signal: expect.any(AbortSignal) };
+        expect((service as any).market.skills.listLiveTools).toHaveBeenCalledWith(
+          'posthog',
+          signalArg,
+        );
+        expect((service as any).market.skills.listTools).toHaveBeenCalledWith('posthog', signalArg);
+        // listConnections + live probe + static fallback each get their own budget.
+        expect(timeoutSpy).toHaveBeenCalledTimes(3);
+        expect(timeoutSpy).toHaveBeenCalledWith(LOBEHUB_SKILL_DISCOVERY_TIMEOUT_MS);
+      } finally {
+        timeoutSpy.mockRestore();
+      }
     });
   });
 
