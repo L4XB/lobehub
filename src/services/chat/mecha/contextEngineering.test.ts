@@ -735,6 +735,32 @@ describe('contextEngineering', () => {
       expect(result.at(-1)?.content).toBe('Tuesday, December 26, 2023 / 08 / Asia/Tokyo');
     });
 
+    it('renders session_date in the same timezone as the temporal placeholders', async () => {
+      // 23:30 UTC is already the next day in Tokyo; both dates must roll over
+      // together or the prompt would carry two different "today"s.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2023-12-25T23:30:00Z'));
+      useUserStore.setState({ settings: { general: { timezone: 'Asia/Tokyo' } } } as any);
+
+      const result = await contextEngineering({
+        messages: [
+          {
+            role: 'user',
+            content: '{{session_date}} | {{date}}',
+            createdAt: Date.now(),
+            id: 'session-date-1',
+            updatedAt: Date.now(),
+          },
+        ],
+        model: 'gpt-4',
+        provider: 'openai',
+      });
+
+      expect(result.at(-1)?.content).toBe(
+        'Tuesday, December 26, 2023 | Tuesday, December 26, 2023',
+      );
+    });
+
     it('should process placeholder variables in array content', async () => {
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(new Date('2023-12-25T14:30:45Z'));

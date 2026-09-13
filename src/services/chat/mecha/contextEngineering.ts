@@ -724,6 +724,11 @@ export const contextEngineering = async ({
   const workspaceContext = resolveClientWorkspaceContext();
 
   // Create MessagesEngine with injected dependencies
+  // One timezone for every date the prompt renders — the core's temporal
+  // placeholders, the system-date line and the host's own `session_date` —
+  // so a run near midnight cannot carry two different dates.
+  const userTimezone = userGeneralSettingsSelectors.currentTimezone(useUserStore.getState());
+
   // Everything gathered above is host-specific; shaping it into engine
   // parameters is shared with the server through `@lobechat/mecha`.
   const snapshot: ContextSnapshot = {
@@ -790,6 +795,7 @@ export const contextEngineering = async ({
         new Intl.DateTimeFormat('en-US', {
           day: 'numeric',
           month: 'long',
+          timeZone: userTimezone,
           weekday: 'long',
           year: 'numeric',
         }).format(new Date()),
@@ -825,7 +831,7 @@ export const contextEngineering = async ({
     world: {
       group: agentGroup,
       userMemory: userMemoryConfig,
-      userTimezone: userGeneralSettingsSelectors.currentTimezone(useUserStore.getState()),
+      userTimezone,
     },
   };
 
