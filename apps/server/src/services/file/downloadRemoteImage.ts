@@ -20,7 +20,11 @@ export const downloadRemoteImage = async (url: string) => {
     throw new TRPCError({ code: 'BAD_REQUEST', message: 'Invalid image URL' });
   }
 
-  const response = await ssrfSafeFetch(url, { signal: AbortSignal.timeout(30_000) });
+  const response = await ssrfSafeFetch(
+    url,
+    { signal: AbortSignal.timeout(30_000) },
+    { maxContentLength: MAX_REMOTE_IMAGE_BYTES + 1 },
+  );
   if (!response.ok) {
     await response.body?.cancel();
     throw new TRPCError({ code: 'BAD_REQUEST', message: 'Failed to download image' });

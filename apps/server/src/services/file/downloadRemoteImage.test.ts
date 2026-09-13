@@ -23,9 +23,15 @@ describe('downloadRemoteImage', () => {
       extension: 'png',
       mimeType: 'image/png',
     });
-    expect(ssrfSafeFetch).toHaveBeenCalledWith('https://cdn.discordapp.com/image', {
-      signal: expect.any(AbortSignal),
-    });
+    expect(ssrfSafeFetch).toHaveBeenCalledWith(
+      'https://cdn.discordapp.com/image',
+      {
+        signal: expect.any(AbortSignal),
+      },
+      {
+        maxContentLength: MAX_REMOTE_IMAGE_BYTES + 1,
+      },
+    );
   });
 
   it.each([
