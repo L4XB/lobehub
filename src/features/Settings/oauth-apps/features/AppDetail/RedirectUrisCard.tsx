@@ -19,6 +19,13 @@ import {
 import SectionCard from './SectionCard';
 
 const styles = createStaticStyles(({ css, cssVar }) => ({
+  // antd's ErrorList only picks up error styling inside a Form.Item that has an
+  // error status; the list-level message sits outside one, so it is colored here.
+  listError: css`
+    font-size: 14px;
+    line-height: 1.5;
+    color: ${cssVar.colorError};
+  `,
   uri: css`
     padding-block: 8px;
     padding-inline: 12px;
@@ -122,6 +129,7 @@ const RedirectUrisCard: FC<RedirectUrisCardProps> = ({ canEdit, detail, onSubmit
                         <Input placeholder={t('oauthApp.form.redirectUris.placeholder')} />
                       </Form.Item>
                       <ActionIcon
+                        aria-label={t('oauthApp.redirectUris.remove')}
                         icon={Trash2Icon}
                         style={{ marginTop: 4 }}
                         title={t('oauthApp.redirectUris.remove')}
@@ -130,7 +138,7 @@ const RedirectUrisCard: FC<RedirectUrisCardProps> = ({ canEdit, detail, onSubmit
                     </Flexbox>
                   ))}
 
-                  <Form.ErrorList errors={errors} />
+                  {errors.length > 0 && <div className={styles.listError}>{errors}</div>}
 
                   <Button
                     block
