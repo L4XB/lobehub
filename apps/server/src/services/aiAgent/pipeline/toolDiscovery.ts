@@ -20,8 +20,6 @@ import type {
 } from '@lobechat/context-engine';
 import type { LobeChatDatabase } from '@lobechat/database';
 import type { DeviceUnavailableErrorData } from '@lobechat/device-gateway-client';
-import { SpanStatusCode } from '@lobechat/observability-otel/api';
-import { tracer as agentRuntimeTracer } from '@lobechat/observability-otel/modules/agent-runtime';
 import type { ChatTopicBotContext, RequestTrigger } from '@lobechat/types';
 import { getActivePluginIds } from '@lobechat/types';
 import { TRPCError } from '@trpc/server';
@@ -87,25 +85,9 @@ import {
 import { resolveServerSearchDecision } from '../searchDecision';
 import { filterPluginsByShareGate, shareGateGrantsCloudSandbox } from '../shareGate';
 import type { ExecRunContext, InternalExecAgentParams } from '../types';
+import { markDegradedStage, traceDiscoveryStage } from './discoveryTracing';
 
 const log = debug('lobe-server:ai-agent-service');
-
-/**
- * Wrap an IO-bound discovery stage in a span. Discovery runs on the send path
- * before the operation exists, so these spans are the only breakdown of how
- * long a user waits between "message saved" and "operation started".
- */
-const traceDiscoveryStage = <T>(stage: string, fn: () => Promise<T>): Promise<T> =>
-  agentRuntimeTracer.startActiveSpan(`tool_discovery ${stage}`, async (span) => {
-    try {
-      return await fn();
-    } catch (error) {
-      span.setStatus({ code: SpanStatusCode.ERROR, message: (error as Error)?.message });
-      throw error;
-    } finally {
-      span.end();
-    }
-  });
 
 export interface ToolDiscoveryDeps {
   agentDocumentsService: AgentDocumentsService;
@@ -298,14 +280,21 @@ export const discoverTools = async (
   const builtinModels = await loadModels();
   const [modelMetadataResult, providerMetadataResult] = await traceDiscoveryStage(
     'model_metadata',
-    () =>
-      Promise.allSettled([
+    async (span) => {
+      const results = await Promise.allSettled([
         new AiModelModel(deps.db, deps.userId, deps.workspaceId).findByIdAndProvider(
           model,
           provider,
         ),
         new AiProviderModel(deps.db, deps.userId, deps.workspaceId).findById(provider),
-      ]),
+      ]);
+      markDegradedStage(
+        span,
+        results.filter((result) => result.status === 'rejected').length,
+        'metadata lookups',
+      );
+      return results;
+    },
   );
   if (modelMetadataResult.status === 'rejected') {
     log('execAgent: failed to load active model search metadata: %O', modelMetadataResult.reason);
@@ -467,9 +456,20 @@ export const discoverTools = async (
     // 5c. Fetch LobeHub Skills manifests
     try {
       const marketService = await deps.getMarketService();
-      lobehubSkillManifests = await traceDiscoveryStage('lobehub_skills', () =>
-        marketService.getLobehubSkillManifests(),
-      );
+      lobehubSkillManifests = await traceDiscoveryStage('lobehub_skills', async (span) => {
+        // The service degrades to fewer (or zero) manifests instead of
+        // throwing, so count what it absorbed — otherwise a Market timeout
+        // looks exactly like a user with no connected skills.
+        let failureCount = 0;
+        const manifests = await marketService.getLobehubSkillManifests({
+          onError: () => {
+            failureCount += 1;
+          },
+        });
+        span.setAttribute('lobehub.tool_discovery.manifest_count', manifests.length);
+        markDegradedStage(span, failureCount, 'skill discovery requests');
+        return manifests;
+      });
     } catch (error) {
       log('execAgent: failed to fetch lobehub skill manifests: %O', error);
     }

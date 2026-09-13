@@ -759,9 +759,15 @@ export class MarketService {
    * Fetch LobeHub Skills manifests from Market API
    * Gets user's connected skills and builds tool manifests for agent execution
    *
+   * @param options.onError - Called for each failure the method absorbs: a
+   * provider whose tools could not be listed (with its `providerId`), or the
+   * connection lookup itself (without one). Lets callers tell degraded
+   * discovery apart from a user with no connected skills.
    * @returns Array of tool manifests for connected skills
    */
-  async getLobehubSkillManifests(): Promise<LobeToolManifest[]> {
+  async getLobehubSkillManifests(options?: {
+    onError?: (error: unknown, providerId?: string) => void;
+  }): Promise<LobeToolManifest[]> {
     try {
       // 1. Get user's connected skills
       const { connections } = await this.market.connect.listConnections({
@@ -780,9 +786,9 @@ export class MarketService {
       const manifests = await pMap(
         connections,
         async (connection): Promise<LobeToolManifest | undefined> => {
+          // Connection returns providerId (e.g., 'twitter', 'linear'), not numeric id
+          const providerId = (connection as any).providerId;
           try {
-            // Connection returns providerId (e.g., 'twitter', 'linear'), not numeric id
-            const providerId = (connection as any).providerId;
             if (!providerId) {
               log('getLobehubSkillManifests: connection missing providerId: %O', connection);
               return;
@@ -820,6 +826,7 @@ export class MarketService {
             return manifest;
           } catch (error) {
             log('getLobehubSkillManifests: failed to fetch tools for connection: %O', error);
+            options?.onError?.(error, providerId);
           }
         },
         { concurrency: LOBEHUB_SKILL_DISCOVERY_CONCURRENCY },
@@ -828,6 +835,7 @@ export class MarketService {
       return manifests.filter((manifest): manifest is LobeToolManifest => !!manifest);
     } catch (error) {
       log('getLobehubSkillManifests: error fetching skills: %O', error);
+      options?.onError?.(error);
       return [];
     }
   }

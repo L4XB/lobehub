@@ -857,6 +857,41 @@ describe('MarketService', () => {
         timeoutSpy.mockRestore();
       }
     });
+
+    it('should report each failed provider through onError', async () => {
+      const service = new MarketService();
+      const onError = vi.fn();
+      const providerError = new Error('Failed');
+      (service as any).market.connect.listConnections = vi.fn().mockResolvedValue({
+        connections: [{ providerId: 'failing' }, { providerId: 'working' }],
+      });
+      (service as any).market.skills.listTools = vi
+        .fn()
+        .mockImplementation((id: string) =>
+          id === 'failing'
+            ? Promise.reject(providerError)
+            : Promise.resolve({ tools: [{ description: 'Work', inputSchema: {}, name: 'work' }] }),
+        );
+
+      const manifests = await service.getLobehubSkillManifests({ onError });
+
+      expect(manifests.map((manifest) => manifest.identifier)).toEqual(['working']);
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledWith(providerError, 'failing');
+    });
+
+    it('should report a failed connection lookup through onError', async () => {
+      const service = new MarketService();
+      const onError = vi.fn();
+      const lookupError = new Error('The operation was aborted due to timeout');
+      (service as any).market.connect.listConnections = vi.fn().mockRejectedValue(lookupError);
+
+      const manifests = await service.getLobehubSkillManifests({ onError });
+
+      expect(manifests).toEqual([]);
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledWith(lookupError);
+    });
   });
 
   describe('skill comments & ratings', () => {
