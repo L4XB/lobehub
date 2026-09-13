@@ -128,7 +128,26 @@ docker run --rm --env-file .env \
 
 可选的搜索 capture 安装器会在 PostgreSQL 中记录 schema 版本。必须先完成数据库迁移，再安装 capture。旧版本应用不得覆盖更新的 capture 定义；若安装器报告未知或不完整定义，应保持当前版本运行，查明不一致后再重试。升级期间会锁住来源表写入并在同一事务中替换定义，因此单纯升级 capture 不会漏掉变更，也无需因此重建全部索引。已建索引的 tool 消息仍需在所有同步 worker 更新资格规则后，另行进行版本化清理。
 
-对于已有的 Elasticsearch 安装，先更新全部应用和持续同步 worker，再运行 `bun run fts-search:cleanup-ineligible-messages --status` 预览 PostgreSQL 中不合格消息的数量，并另行记录 Elasticsearch `messages` alias 中仍有效的 `role=tool` 数量。单独安排清理时，使用 `--apply --yes --all-workers-upgraded --state-file=/private/path/ineligible-messages.json --batch-size=250 --max-batches=10 --delay-ms=1000` 分批执行。检查点文件会私下保存来源游标，请保留以便恢复。重跑同一批是安全的：它会分配更新的 Outbox revision，由正常同步 worker 写入带版本围栏的软墓碑，或写入消息当前合格的投影。等待 Outbox 清空且无死信后，确认 Elasticsearch 计数向零下降。此命令不修改 PostgreSQL 消息，也不直接向 Elasticsearch 写入。
+对于已有的 Elasticsearch 安装，先更新全部应用和持续同步 worker，再预览 PostgreSQL 中不合格消息的数量，并另行记录 Elasticsearch `messages` alias 中仍有效的 `role=tool` 数量：
+
+```bash
+docker run --rm --env-file .env \
+  -v lobehub-search-state:/app/.elasticsearch-reindex \
+  "$LOBE_MIGRATION_IMAGE" /app/fts-search-ineligible-message-cleanup.cjs --status
+```
+
+全部同步 worker 更新后，再单独安排分批清理；继续挂载同一个卷来保存私有检查点：
+
+```bash
+docker run --rm --env-file .env \
+  -v lobehub-search-state:/app/.elasticsearch-reindex \
+  "$LOBE_MIGRATION_IMAGE" /app/fts-search-ineligible-message-cleanup.cjs \
+  --apply --yes --all-workers-upgraded \
+  --state-file=/app/.elasticsearch-reindex/ineligible-messages.json \
+  --batch-size=250 --max-batches=10 --delay-ms=1000
+```
+
+请保留检查点卷以便恢复，不要在两次运行之间删除它。重跑同一批是安全的：它会分配更新的 Outbox revision，由正常同步 worker 写入带版本围栏的软墓碑，或写入消息当前合格的投影。等待 Outbox 清空且无死信后，确认 Elasticsearch 计数向零下降。此命令不修改 PostgreSQL 消息，也不直接向 Elasticsearch 写入。
 
 ## 迁移中断怎么办
 

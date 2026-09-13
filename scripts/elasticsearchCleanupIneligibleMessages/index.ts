@@ -166,7 +166,3 @@ export const runIneligibleMessageCleanupCli = async (args = process.argv.slice(2
     await pool.end();
   }
 };
-
-if (import.meta.main) {
-  await runIneligibleMessageCleanupCli();
-}
