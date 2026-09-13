@@ -12,12 +12,29 @@ vi.mock('@lobehub/ui/base-ui', () => ({ toast: { error: vi.fn() } }));
 vi.mock('i18next', () => ({ t: (key: string) => key }));
 
 describe('editor image rehosting', () => {
-  beforeEach(() => vi.clearAllMocks());
+  const defaultUrl = window.location.href;
 
-  it('transfers Discord URLs and protocol-relative external images', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.happyDOM.setURL(defaultUrl);
+  });
+
+  it('transfers Discord and external image URLs', () => {
     expect(needsImageRehost('https://cdn.discordapp.com/attachments/image.png?ex=123')).toBe(true);
-    expect(needsImageRehost('//media.discordapp.net/image.png')).toBe(true);
     expect(needsImageRehost('https://external.example/f/image.png')).toBe(true);
+  });
+
+  it('normalizes protocol-relative images to HTTPS on the desktop origin', async () => {
+    window.happyDOM.setURL('app://renderer/');
+    vi.mocked(fileService.rehostImage).mockResolvedValue({
+      fileId: 'rehosted-file',
+      url: 'https://storage.example/rehosted.png',
+    });
+
+    expect(needsImageRehost('//media.discordapp.net/image.png')).toBe(true);
+    await rehostImage('//media.discordapp.net/image.png');
+
+    expect(fileService.rehostImage).toHaveBeenCalledWith('https://media.discordapp.net/image.png');
   });
 
   it('does not transfer internal attachments or local image upload sources', () => {
