@@ -160,7 +160,28 @@ export function parse(messages: Message[], messageGroups?: MessageGroupMetadata[
   //    same turn — it is a different participant in the same conversation —
   //    but branch resolution has no way to tell, so the reply vanished from
   //    the transcript while remaining in messageMap (#19552).
+  // Everything the transcript already shows. Not just the top-level ids: a
+  // council block carries its members INSIDE the supervisor's bubble and
+  // leaves only the group at top level, so counting only top-level ids would
+  // append every broadcast answer a second time.
+  const collectRenderedIds = (value: unknown, into: Set<string>): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) collectRenderedIds(item, into);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    const candidate = value as { id?: unknown; role?: unknown };
+    if (typeof candidate.id === 'string' && typeof candidate.role === 'string') {
+      into.add(candidate.id);
+    }
+    for (const nested of Object.values(value as Record<string, unknown>)) {
+      collectRenderedIds(nested, into);
+    }
+  };
+
   const visibleIds = new Set(processedFlatList.map((message) => message.id));
+  const renderedIds = new Set<string>();
+  collectRenderedIds(processedFlatList, renderedIds);
   const recoveredFlatList = [...processedFlatList];
 
   const insertByCreatedAt = (message: Message) => {
@@ -172,12 +193,22 @@ export function parse(messages: Message[], messageGroups?: MessageGroupMetadata[
     else recoveredFlatList.splice(insertAt, 0, message);
   };
 
+  // A member is recovered only when the shell it hangs off is itself on the
+  // active branch. Without that, a shell the user regenerated away from takes
+  // its member with it into the transcript — and into the context the next
+  // request is built from — while the shell itself stays correctly hidden.
+  const isRecoverableMember = (message: Message) =>
+    message.role === 'assistant' &&
+    message.metadata?.orchestrationRole === 'member' &&
+    !renderedIds.has(message.id) &&
+    message.parentId != null &&
+    visibleIds.has(message.parentId);
+
   const hiddenBranchSiblings = processedMessages
     .filter(
       (message) =>
-        !visibleIds.has(message.id) &&
-        (message.role === 'taskCallback' ||
-          (message.role === 'assistant' && message.metadata?.orchestrationRole === 'member')),
+        (message.role === 'taskCallback' && !visibleIds.has(message.id)) ||
+        isRecoverableMember(message),
     )
     .toSorted((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
