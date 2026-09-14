@@ -143,27 +143,45 @@ export function parse(messages: Message[], messageGroups?: MessageGroupMetadata[
     return next;
   });
 
-  // Historical data can contain a taskCallback and a tool result as
-  // sibling branches under the same assistant tool-use shell. Normal branch
-  // resolution must keep choosing one conversational continuation, but hiding
-  // the inactive callback also hides the only user-visible record that a task
-  // finished. Recover only those callback cards into the render list; do not
-  // pull their assistant descendants across branches (they may contradict the
-  // active continuation).
+  // Two shapes sit as sibling branches under the same assistant tool-use shell
+  // and lose branch resolution to the continuation the conversation actually
+  // took. Normal branch resolution must keep choosing ONE continuation, so
+  // neither is fixed by changing which branch wins — they are recovered into
+  // the render list instead, at their own timestamps. Their descendants are
+  // deliberately not pulled across: those may contradict the active
+  // continuation.
+  //
+  //  - A taskCallback next to a tool result. Hiding the inactive callback also
+  //    hides the only user-visible record that a task finished.
+  //  - A group member's reply. `speak` parents the member's answer to the
+  //    SUPERVISOR's tool-use message, not to the tool result, so the member
+  //    reply and the tool result are siblings and the supervisor continues
+  //    through the tool result. The member is not a competing answer to the
+  //    same turn — it is a different participant in the same conversation —
+  //    but branch resolution has no way to tell, so the reply vanished from
+  //    the transcript while remaining in messageMap (#19552).
   const visibleIds = new Set(processedFlatList.map((message) => message.id));
   const recoveredFlatList = [...processedFlatList];
-  const hiddenTaskCallbacks = processedMessages
-    .filter((message) => message.role === 'taskCallback' && !visibleIds.has(message.id))
+
+  const insertByCreatedAt = (message: Message) => {
+    const createdAt = new Date(message.createdAt).getTime();
+    const insertAt = recoveredFlatList.findIndex(
+      (candidate) => new Date(candidate.createdAt).getTime() > createdAt,
+    );
+    if (insertAt === -1) recoveredFlatList.push(message);
+    else recoveredFlatList.splice(insertAt, 0, message);
+  };
+
+  const hiddenBranchSiblings = processedMessages
+    .filter(
+      (message) =>
+        !visibleIds.has(message.id) &&
+        (message.role === 'taskCallback' ||
+          (message.role === 'assistant' && message.metadata?.orchestrationRole === 'member')),
+    )
     .toSorted((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
-  for (const callback of hiddenTaskCallbacks) {
-    const callbackTime = new Date(callback.createdAt).getTime();
-    const insertAt = recoveredFlatList.findIndex(
-      (message) => new Date(message.createdAt).getTime() > callbackTime,
-    );
-    if (insertAt === -1) recoveredFlatList.push(callback);
-    else recoveredFlatList.splice(insertAt, 0, callback);
-  }
+  for (const message of hiddenBranchSiblings) insertByCreatedAt(message);
 
   return {
     contextTree,
