@@ -327,3 +327,171 @@ describe('parse — members the recovery must leave alone', () => {
     expect(rendered).not.toContain('member-reply-old');
   });
 });
+
+// Issue #19566. The recovery condition asked whether the member's parent was a
+// TOP-LEVEL flatList entry. One supervisor tool call before the `speak` call is
+// enough to fold that call into the supervisor's group, where it lives at
+// `flatList[i].children[j]` and is absent from the top-level id set, so a
+// member whose shell is plainly on screen was still dropped.
+describe('parse — a speak call nested inside a group (#19566)', () => {
+  const nestedSpeakTurn = (): Message[] =>
+    [
+      {
+        agentId: 'supervisor',
+        content: 'user',
+        createdAt: 1,
+        id: 'user',
+        parentId: null,
+        role: 'user',
+        updatedAt: 1,
+      },
+      {
+        agentId: 'supervisor',
+        content: 'Preparation',
+        createdAt: 1.5,
+        id: 'prep-call',
+        parentId: 'user',
+        role: 'assistant',
+        tools: [
+          {
+            apiName: 'prepare',
+            arguments: '{}',
+            id: 'prep-tool',
+            identifier: 'example',
+            result_msg_id: 'prep-result',
+            type: 'builtin',
+          },
+        ],
+        updatedAt: 1.5,
+      },
+      {
+        agentId: 'supervisor',
+        content: 'Ready',
+        createdAt: 2,
+        id: 'prep-result',
+        parentId: 'prep-call',
+        role: 'tool',
+        tool_call_id: 'prep-tool',
+        updatedAt: 2,
+      },
+      {
+        agentId: 'supervisor',
+        content: 'supervisor-call',
+        createdAt: 4,
+        id: 'supervisor-call',
+        parentId: 'prep-result',
+        role: 'assistant',
+        tools: [
+          {
+            apiName: 'speak',
+            arguments: '{"agentId":"member"}',
+            id: 'call-speak',
+            identifier: 'lobe-group-management',
+            result_msg_id: 'tool-result',
+            type: 'builtin',
+          },
+        ],
+        updatedAt: 4,
+      },
+      {
+        agentId: 'supervisor',
+        content: 'Member started',
+        createdAt: 5,
+        id: 'tool-result',
+        parentId: 'supervisor-call',
+        role: 'tool',
+        tool_call_id: 'call-speak',
+        updatedAt: 5,
+      },
+      {
+        agentId: 'member',
+        content: 'SYNTHETIC_MEMBER_REPLY',
+        createdAt: 6,
+        id: 'member-reply',
+        metadata: { orchestrationRole: 'member' },
+        parentId: 'supervisor-call',
+        role: 'assistant',
+        updatedAt: 6,
+      },
+      {
+        agentId: 'supervisor',
+        content: 'supervisor-followup',
+        createdAt: 7,
+        id: 'supervisor-followup',
+        parentId: 'tool-result',
+        role: 'assistant',
+        updatedAt: 7,
+      },
+    ] as unknown as Message[];
+
+  // Every id the output carries, at any depth. Deliberately not a copy of the
+  // implementation's own rule about which shapes count as rendered: this has to
+  // be able to disagree with it.
+  const idsAnywhere = (value: unknown, into: Set<string> = new Set()): Set<string> => {
+    if (Array.isArray(value)) {
+      for (const entry of value) idsAnywhere(entry, into);
+      return into;
+    }
+    if (!value || typeof value !== 'object') return into;
+    const candidate = value as { id?: unknown };
+    if (typeof candidate.id === 'string') into.add(candidate.id);
+    for (const nested of Object.values(value as Record<string, unknown>)) {
+      idsAnywhere(nested, into);
+    }
+    return into;
+  };
+
+  it('recovers the member when its speak call is folded into the group', () => {
+    const { flatList } = parse(nestedSpeakTurn());
+
+    // Anywhere in the rendered tree, not only at the top level: the assertion
+    // has to be the one the reader's screen makes.
+    expect([...idsAnywhere(flatList)]).toContain('member-reply');
+    expect(JSON.stringify(flatList)).toContain('SYNTHETIC_MEMBER_REPLY');
+  });
+
+  it('recovers it exactly once', () => {
+    const { flatList } = parse(nestedSpeakTurn());
+
+    const occurrences = JSON.stringify(flatList).split('SYNTHETIC_MEMBER_REPLY').length - 1;
+    expect(occurrences).toBe(1);
+  });
+
+  it("keeps the supervisor's own continuation", () => {
+    const { flatList } = parse(nestedSpeakTurn());
+
+    expect(JSON.stringify(flatList)).toContain('supervisor-followup');
+  });
+
+  it('still refuses a member whose group was regenerated away', () => {
+    // The abandoned-branch safeguard, on the nested shape, and the reason the
+    // widened id set has to stay keyed on what was actually rendered. The whole
+    // group -- preparation, `speak` call and all -- lost branch resolution to a
+    // second attempt, so its member must go with it. If `collectRenderedIds`
+    // walked `messageMap` or the raw input instead of the render list, this is
+    // the cell that would notice.
+    const regenerated = [
+      ...nestedSpeakTurn().map((message) =>
+        message.id === 'user' ? { ...message, metadata: { activeBranchIndex: 1 } } : message,
+      ),
+      {
+        agentId: 'supervisor',
+        content: 'second attempt',
+        createdAt: 8,
+        id: 'prep-call-new',
+        parentId: 'user',
+        role: 'assistant',
+        updatedAt: 8,
+      },
+    ] as unknown as Message[];
+
+    const { flatList } = parse(regenerated);
+    const rendered = idsAnywhere(flatList);
+
+    // The regeneration wins the branch, as it must.
+    expect([...rendered]).toContain('prep-call-new');
+    expect([...rendered]).not.toContain('supervisor-call');
+    // And the member that hung off the abandoned `speak` call goes with it.
+    expect(JSON.stringify(flatList)).not.toContain('SYNTHETIC_MEMBER_REPLY');
+  });
+});
