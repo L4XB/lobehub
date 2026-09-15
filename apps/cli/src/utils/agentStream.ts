@@ -167,6 +167,22 @@ export function replayAgentEvents(events: AgentStreamEvent[], options: StreamOpt
 const HEARTBEAT_INTERVAL = 30_000;
 
 /**
+ * How long the WebSocket stream may go without PROGRESS before it gives up.
+ *
+ * The SSE path ends on its own: `streamAgentEvents` reads the response body to
+ * the end, so the server closing the response returns the function. The
+ * WebSocket path has no equivalent -- it settles only on `agent_runtime_end`,
+ * `session_complete`, `onerror` or `onclose`, so a gateway that authenticates
+ * and then sends none of those leaves the promise pending forever while the
+ * heartbeat interval holds the event loop open. `lh agent run` then never
+ * exits and produces no exit code, which is what `--sse` worked around (#19543).
+ *
+ * Measured against a gateway that authenticates, acks heartbeats and sends
+ * nothing else: the client was still running when a 12s external cap killed it.
+ */
+const PROGRESS_TIMEOUT = 300_000;
+
+/**
  * Connect to the Agent Gateway via WebSocket and render events to the terminal.
  * Resolves when the session completes or the connection closes.
  */
@@ -187,14 +203,43 @@ export async function streamAgentEventsViaWebSocket(
     const ctx = createRenderContext();
     let lastEventId = '';
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    let progressTimer: ReturnType<typeof setTimeout> | undefined;
     let isSettled = false;
     let jsonPrinted = false;
 
     const cleanup = () => {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (progressTimer) clearTimeout(progressTimer);
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close();
       }
+    };
+
+    /**
+     * Restarted by PROGRESS, not by liveness.
+     *
+     * `heartbeat_ack` deliberately does not reset it: the reproduced failure is
+     * a gateway that keeps acking heartbeats while the run is already finished
+     * server-side, so a deadline that counted an ack as progress would be reset
+     * every 30s and never fire -- the same infinite wait with extra steps.
+     */
+    const armProgressTimeout = () => {
+      if (progressTimer) clearTimeout(progressTimer);
+      progressTimer = setTimeout(() => {
+        if (isSettled) return;
+        isSettled = true;
+        if (streamOpts.json && jsonEvents.length > 0 && !jsonPrinted) {
+          jsonPrinted = true;
+          console.log(JSON.stringify(jsonEvents, null, 2));
+        }
+        cleanup();
+        reject(
+          new Error(
+            `Agent gateway WebSocket sent no progress for ${PROGRESS_TIMEOUT / 1000}s and never reported completion. ` +
+              `The run may have finished server-side; check the topic, and re-run with --sse, which ends when the server closes the response.`,
+          ),
+        );
+      }, PROGRESS_TIMEOUT);
     };
 
     ws.onopen = () => {
@@ -216,6 +261,11 @@ export async function streamAgentEventsViaWebSocket(
             ws.send(JSON.stringify({ type: 'heartbeat' }));
           }
         }, HEARTBEAT_INTERVAL);
+        // A heartbeat is liveness, not a reason to keep the process alive: on
+        // its own it was the only handle holding the loop open after the run
+        // had finished.
+        heartbeatTimer.unref?.();
+        armProgressTimeout();
         return;
       }
 
@@ -226,6 +276,8 @@ export async function streamAgentEventsViaWebSocket(
       }
 
       if (msg.type === 'heartbeat_ack') return;
+
+      armProgressTimeout();
 
       if (msg.type === 'agent_event') {
         const agentEvent: AgentStreamEvent = msg.event;
@@ -289,6 +341,7 @@ export async function streamAgentEventsViaWebSocket(
 
     ws.onclose = (event) => {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (progressTimer) clearTimeout(progressTimer);
       if (isSettled) return;
 
       if (streamOpts.json && jsonEvents.length > 0 && !jsonPrinted) {
