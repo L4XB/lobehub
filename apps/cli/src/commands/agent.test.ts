@@ -1243,9 +1243,11 @@ describe('agent command', () => {
       expect(mockTrpcClient.aiAgent.getOperationStatus.query).toHaveBeenCalledTimes(1);
     });
 
-    it('stops on a run parked for human input it cannot answer', async () => {
-      // Nothing on this path can supply the answer: the live stream that would
-      // have carried the prompt is the one that just dropped.
+    it('does not report success for a run parked on an unanswered approval', async () => {
+      // Stopping is right: the server ends this operation's stream at the park
+      // and the approval continues under a NEW operation id, so this one never
+      // turns into `done`. Exiting 0 was not — nothing on this path can supply
+      // the answer, and the run did not finish.
       mockTrpcClient.aiAgent.getOperationStatus.query.mockResolvedValue(
         envelope({ status: 'waiting_for_human', stepCount: 3 }),
       );
@@ -1253,7 +1255,24 @@ describe('agent command', () => {
       await runAgent();
 
       expect(mockTrpcClient.aiAgent.getOperationStatus.query).toHaveBeenCalledTimes(1);
-      expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('waiting for human input'));
+      expect(log.error).toHaveBeenCalledWith(expect.stringContaining('waiting for human input'));
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it('keeps polling a run parked on an async tool, which resumes the same operation', async () => {
+      // The other parked status is not stream-terminal: deferred tools resume
+      // THIS operation id, so it does reach a terminal state and waiting pays off.
+      mockTrpcClient.aiAgent.getOperationStatus.query
+        .mockResolvedValueOnce(envelope({ status: 'waiting_for_async_tool', stepCount: 3 }))
+        .mockResolvedValue(envelope({ status: 'done', stepCount: 4 }));
+
+      const done = runAgent();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await done;
+
+      expect(mockTrpcClient.aiAgent.getOperationStatus.query).toHaveBeenCalledTimes(2);
+      expect(exitSpy).not.toHaveBeenCalledWith(1);
+      expect(log.info).toHaveBeenCalledWith(expect.stringContaining('done'));
     });
 
     it('falls back to the envelope summary when no status string is present', async () => {

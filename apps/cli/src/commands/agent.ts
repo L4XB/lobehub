@@ -944,12 +944,20 @@ async function pollAgentRunStatus(
       return;
     }
 
-    // A parked run is waiting for an answer this command cannot give: the live
-    // stream has already dropped, so there is no prompt to respond to here.
+    // A parked run is stream-terminal but not finished. The server ends this
+    // operation's stream at the park and the approved continuation runs under a
+    // NEW operation id (`STREAM_END_STATUSES` in the server's
+    // `AgentRuntimeCoordinator`), so polling on can never see this one complete
+    // — stopping is right. Reporting success was not: nothing on this path can
+    // supply the answer, so the command exited 0 on a run sitting unfinished on
+    // an unanswered approval.
+    //
+    // `waiting_for_async_tool` is the opposite — deferred tools resume THIS
+    // operation id — so it deliberately falls through and keeps polling.
     if (status === 'waiting_for_human' || r.needsHumanInput) {
-      log.warn(
-        `Run is waiting for human input, which this command cannot provide once the live ` +
-          `stream has dropped. Answer it in the app, then check ` +
+      exitWithError(
+        `Run is waiting for human input and did not complete. Approve it in the app; the ` +
+          `approved run continues as a new operation. This one stays at ` +
           `\`lh agent status ${operationId}\`.`,
       );
       return;
