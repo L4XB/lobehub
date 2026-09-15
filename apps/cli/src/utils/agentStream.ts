@@ -183,6 +183,22 @@ const HEARTBEAT_INTERVAL = 30_000;
 const PROGRESS_TIMEOUT = 300_000;
 
 /**
+ * How long the socket may take to open and finish the auth handshake.
+ *
+ * The deadline above only starts at `auth_success`, so it covers nothing
+ * before the gateway authenticates. A gateway that completes the WebSocket
+ * upgrade and then answers neither `auth_success` nor `auth_failed` leaves a
+ * live, healthy connection behind, and a live connection need never fire
+ * `onerror` or `onclose` -- so nothing was armed at all and the promise stayed
+ * pending exactly as it did after auth (#19543).
+ *
+ * Generous on purpose: the window covers the TCP connect, the upgrade, and an
+ * apiKey handshake, where the gateway calls back to `serverUrl` to verify the
+ * token before it answers.
+ */
+const HANDSHAKE_TIMEOUT = 30_000;
+
+/**
  * Connect to the Agent Gateway via WebSocket and render events to the terminal.
  * Resolves when the session completes or the connection closes.
  */
@@ -209,11 +225,37 @@ export async function streamAgentEventsViaWebSocket(
 
     const cleanup = () => {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      clearTimeout(handshakeTimer);
       if (progressTimer) clearTimeout(progressTimer);
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close();
       }
     };
+
+    /** Flush any buffered JSON, tear the socket down, and fail the stream. */
+    const failStream = (message: string) => {
+      if (isSettled) return;
+      isSettled = true;
+      if (streamOpts.json && jsonEvents.length > 0 && !jsonPrinted) {
+        jsonPrinted = true;
+        console.log(JSON.stringify(jsonEvents, null, 2));
+      }
+      cleanup();
+      reject(new Error(message));
+    };
+
+    /**
+     * Armed at connect time, cleared by `auth_success`, which hands the wait
+     * over to the progress deadline. Neither is unref'd: each is the handle
+     * that settles the promise on its own path, so it has to keep the process
+     * alive -- which makes clearing it on every exit path part of the fix.
+     */
+    const handshakeTimer = setTimeout(() => {
+      failStream(
+        `Agent gateway WebSocket did not complete the auth handshake within ${HANDSHAKE_TIMEOUT / 1000}s. ` +
+          `Check the gateway URL and credentials, and re-run with --sse, which ends when the server closes the response.`,
+      );
+    }, HANDSHAKE_TIMEOUT);
 
     /**
      * Restarted by PROGRESS, not by liveness.
@@ -226,18 +268,9 @@ export async function streamAgentEventsViaWebSocket(
     const armProgressTimeout = () => {
       if (progressTimer) clearTimeout(progressTimer);
       progressTimer = setTimeout(() => {
-        if (isSettled) return;
-        isSettled = true;
-        if (streamOpts.json && jsonEvents.length > 0 && !jsonPrinted) {
-          jsonPrinted = true;
-          console.log(JSON.stringify(jsonEvents, null, 2));
-        }
-        cleanup();
-        reject(
-          new Error(
-            `Agent gateway WebSocket sent no progress for ${PROGRESS_TIMEOUT / 1000}s and never reported completion. ` +
-              `The run may have finished server-side; check the topic, and re-run with --sse, which ends when the server closes the response.`,
-          ),
+        failStream(
+          `Agent gateway WebSocket sent no progress for ${PROGRESS_TIMEOUT / 1000}s and never reported completion. ` +
+            `The run may have finished server-side; check the topic, and re-run with --sse, which ends when the server closes the response.`,
         );
       }, PROGRESS_TIMEOUT);
     };
@@ -254,6 +287,7 @@ export async function streamAgentEventsViaWebSocket(
 
       if (msg.type === 'auth_success') {
         log.debug('Gateway authenticated');
+        clearTimeout(handshakeTimer);
         // Request all buffered events (covers events pushed before WS connected)
         ws.send(JSON.stringify({ lastEventId: '', type: 'resume' }));
         heartbeatTimer = setInterval(() => {
@@ -341,6 +375,7 @@ export async function streamAgentEventsViaWebSocket(
 
     ws.onclose = (event) => {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      clearTimeout(handshakeTimer);
       if (progressTimer) clearTimeout(progressTimer);
       if (isSettled) return;
 

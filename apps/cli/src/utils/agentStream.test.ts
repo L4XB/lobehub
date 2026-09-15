@@ -774,4 +774,87 @@ describe('streamAgentEventsViaWebSocket completion guarantee', () => {
       setIntervalSpy.mockRestore();
     }
   });
+
+  /**
+   * The same wait, one step earlier in the handshake.
+   *
+   * `armProgressTimeout` is reached from `auth_success`, so it covers nothing
+   * before the gateway authenticates. A gateway that completes the WebSocket
+   * upgrade and then answers neither `auth_success` nor `auth_failed` leaves a
+   * healthy socket behind — `onerror` and `onclose` need never fire on a live
+   * connection — so nothing at all was armed and the promise stayed pending
+   * exactly as it did after auth.
+   */
+  describe('before authentication', () => {
+    /** Upgrade the socket, then say nothing at all. */
+    const silentAfterUpgrade = () => {
+      (globalThis as any).WebSocket = class extends MockWebSocket {
+        constructor(url: string) {
+          super(url, false); // never answers the auth message
+          capturedWs = this; // eslint-disable-line @typescript-eslint/no-this-alias
+        }
+      };
+    };
+
+    const connect = () =>
+      streamAgentEventsViaWebSocket({
+        gatewayUrl: 'https://gw.test.com',
+        operationId: 'op-1',
+        token: 'tok',
+      });
+
+    /** Record how the promise settles without leaving a rejection unhandled. */
+    const watch = (promise: Promise<void>) => {
+      const seen: { outcome?: string } = {};
+      void promise.then(
+        () => (seen.outcome = 'resolved'),
+        (error: Error) => (seen.outcome = error.message),
+      );
+      return seen;
+    };
+
+    it('gives up when the gateway upgrades the socket but never answers the handshake', async () => {
+      silentAfterUpgrade();
+      const seen = watch(connect());
+
+      await vi.advanceTimersByTimeAsync(0); // upgrade + auth sent, no reply
+      expect(seen.outcome).toBeUndefined();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(seen.outcome).toMatch(/did not complete the auth handshake/);
+      expect(capturedWs!.readyState).toBe(MockWebSocket.CLOSED);
+    });
+
+    it('arms the handshake deadline at connect time and drops it when the socket closes', async () => {
+      silentAfterUpgrade();
+      const promise = connect();
+      const settled = expect(promise).rejects.toThrow(/closed before completion/);
+
+      await vi.advanceTimersByTimeAsync(0);
+      // The whole point: something is counting before `auth_success`.
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      capturedWs!.readyState = MockWebSocket.CLOSED;
+      capturedWs!.onclose?.({ code: 1006, reason: '', type: 'close' });
+
+      await settled;
+      // And it does not outlive its socket — a deadline that did would hold the
+      // loop open for another 30s, which is the failure this whole file is about.
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('hands over to the progress deadline once the gateway authenticates', async () => {
+      const seen = watch(authenticated());
+
+      await vi.advanceTimersByTimeAsync(0); // upgrade + auth_success
+      // Well past the handshake budget, well inside the progress deadline.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(seen.outcome).toBeUndefined();
+
+      capturedWs!.simulateMessage({ type: 'session_complete' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seen.outcome).toBe('resolved');
+    });
+  });
 });
