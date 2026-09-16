@@ -30,7 +30,11 @@ export class DocLoader implements FileLoaderInterface {
         .filter(Boolean);
 
       const body = hasGetBody ? read('getBody') : ((extracted?.text as string) ?? '');
-      const pageContent: string = asides.length ? [body.trimEnd(), ...asides].join('\n\n') : body;
+      // A document whose text lives only in a text box has an empty body, and
+      // keeping it would open the content with two blank lines.
+      const pageContent: string = asides.length
+        ? [body.trimEnd(), ...asides].filter(Boolean).join('\n\n')
+        : body;
 
       const lines = pageContent.split('\n');
       const lineCount = lines.length;

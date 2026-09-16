@@ -62,6 +62,15 @@ describe('DocLoader streams', () => {
     );
   });
 
+  it('does not open a body-less document with two blank lines', async () => {
+    extractMock.mockResolvedValueOnce(wordDocument({ textboxes: 'Only a text box' }));
+
+    const pages = await loader.loadPages('irrelevant.doc');
+
+    expect(pages[0].pageContent).toBe('Only a text box');
+    expect(pages[0].lineCount).toBe(1);
+  });
+
   it('leaves a document that only has a body exactly as it was', async () => {
     extractMock.mockResolvedValueOnce(wordDocument({ body: 'Only a body here\n' }));
 
